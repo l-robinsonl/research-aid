@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//home/hubertblu/.claude/sessions/**)",
+      "Read(//home/hubertblu/.claude/**)"
+    ]
+  }
+}

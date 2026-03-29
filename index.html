@@ -560,6 +560,10 @@
             position: relative;
         }
 
+        aside.tools > * {
+            flex: 0 0 auto;
+        }
+
         .column-resize-handle {
             position: absolute;
             top: 0;
@@ -719,12 +723,18 @@
             color: var(--text);
         }
 
+        aside.tools > .draft-panel:not(.is-detached) {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            min-height: 360px;
+            min-width: 0;
+        }
+
         .draft-panel {
             display: flex;
             flex-direction: column;
             gap: 10px;
-            flex: 1 0 360px;
-            min-height: 360px;
             min-width: 0;
         }
 
