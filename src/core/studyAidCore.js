@@ -105,6 +105,7 @@ export function createStudyAidCore() {
     const metadataOverrideStorageKey = buildScopedStorageKey("study_aid_metadata_overrides_v1");
     const pdfAttachmentMetaStorageKey = buildScopedStorageKey("study_aid_attachment_meta_v1");
     const aiChatConfigStorageKey = buildScopedStorageKey("study_aid_ai_chat_config_v1");
+    const chatThreadsStorageKey = buildScopedStorageKey("study_aid_chat_threads_v1");
     const rightPanelCollapseStorageKey = buildScopedStorageKey("study_aid_right_panel_collapsed_v1");
     const paperNotesStorageKey = buildScopedStorageKey("study_aid_source_notes_v1");
     const themeStorageKey = "study_aid_theme_v1";
@@ -116,6 +117,7 @@ export function createStudyAidCore() {
     const defaultDocumentContextMaxChars = 60000;
     const minDocumentContextMaxChars = 12000;
     const maxDocumentContextMaxChars = 500000;
+    const maxPersistedChatMessagesPerSource = 24;
     const frameBlockedHosts = [
         "cambridge.org",
         "doi.org",
@@ -159,6 +161,7 @@ export function createStudyAidCore() {
     let currentRef = { full: "", narrative: "", parenthetical: "" };
     let activeSource = null;
     let collapsedRightPanels = loadCollapsedRightPanels();
+    let chatThreadsBySource = loadChatThreadsBySource();
     let paperNotesBySource = loadPaperNotesBySource();
     let sectionDrafts = loadSectionDrafts();
     let activeDraftSectionKey = generalDraftSectionKey;
@@ -636,6 +639,10 @@ export function createStudyAidCore() {
             aiConfigStatusMessage = `Model selected: ${selectedModel}`;
             saveAiChatConfig();
             renderAiConfig();
+        });
+
+        aiFetchModelsBtn.addEventListener("click", () => {
+            void fetchAiModels();
         });
 
         aiInstructionSelect.addEventListener("change", (event) => {
@@ -1388,6 +1395,7 @@ export function createStudyAidCore() {
             chatStatusMessage = "Started a fresh chat for this document.";
         }
 
+        persistChatThreadForActiveSource();
         renderChatWidget();
     }
 
@@ -1534,10 +1542,33 @@ export function createStudyAidCore() {
             : html;
 
         element.innerHTML = safeHtml;
+        renderMathContent(element);
         element.querySelectorAll("a").forEach((link) => {
             link.setAttribute("target", "_blank");
             link.setAttribute("rel", "noreferrer noopener");
         });
+    }
+
+    function renderMathContent(element) {
+        if (!element || !window.renderMathInElement) {
+            return;
+        }
+
+        try {
+            window.renderMathInElement(element, {
+                delimiters: [
+                    { left: "$$", right: "$$", display: true },
+                    { left: "\\[", right: "\\]", display: true },
+                    { left: "\\(", right: "\\)", display: false },
+                    { left: "$", right: "$", display: false },
+                ],
+                throwOnError: false,
+                strict: "ignore",
+                ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code"],
+            });
+        } catch (error) {
+            // Leave the sanitized markdown/html content in place if math rendering fails.
+        }
     }
 
     function normalizeEditorMode(mode) {
@@ -1603,6 +1634,7 @@ export function createStudyAidCore() {
                 .replace(/\r/g, "")
                 .trim(),
         });
+        persistChatThreadForActiveSource();
         renderChatWidget();
     }
 
@@ -1611,12 +1643,12 @@ export function createStudyAidCore() {
         const sourceChanged = chatDocumentSourceId !== nextSourceId;
 
         if (sourceChanged) {
-            clearChatMessages({ silent: true });
             chatRequestToken += 1;
             chatRequestInFlight = false;
         }
 
         chatDocumentSourceId = nextSourceId;
+        chatThread = nextSourceId ? getStoredChatThread(nextSourceId) : [];
         chatResponseReady = false;
         chatStatusMessage = "";
         activeDocumentContextPromise = null;
@@ -1633,6 +1665,81 @@ export function createStudyAidCore() {
 
         if (source) {
             refreshActiveDocumentContext(false);
+        }
+    }
+
+    function normalizeStoredChatMessage(message) {
+        const role = message?.role === "assistant" || message?.role === "system" ? message.role : "user";
+        const content = String(message?.content || "")
+            .replace(/\0/g, " ")
+            .replace(/\r/g, "")
+            .trim();
+
+        if (!content) {
+            return null;
+        }
+
+        return { role, content };
+    }
+
+    function normalizeStoredChatThread(thread) {
+        if (!Array.isArray(thread)) {
+            return [];
+        }
+
+        return thread
+            .map(normalizeStoredChatMessage)
+            .filter(Boolean)
+            .slice(-maxPersistedChatMessagesPerSource);
+    }
+
+    function getStoredChatThread(sourceId) {
+        if (!sourceId) {
+            return [];
+        }
+
+        return normalizeStoredChatThread(chatThreadsBySource[sourceId]);
+    }
+
+    function persistChatThreadForSource(sourceId, thread = chatThread) {
+        if (!sourceId) {
+            return;
+        }
+
+        const normalizedThread = normalizeStoredChatThread(thread);
+        if (normalizedThread.length) {
+            chatThreadsBySource[sourceId] = normalizedThread;
+        } else {
+            delete chatThreadsBySource[sourceId];
+        }
+
+        saveChatThreadsBySource();
+    }
+
+    function persistChatThreadForActiveSource() {
+        persistChatThreadForSource(chatDocumentSourceId);
+    }
+
+    function migrateStoredChatThread(sourceId, targetSourceId) {
+        const fromId = cleanMetadataValue(sourceId);
+        const toId = cleanMetadataValue(targetSourceId);
+        if (!fromId || !toId || fromId === toId) {
+            return;
+        }
+
+        const sourceThread = getStoredChatThread(fromId);
+        if (!sourceThread.length) {
+            return;
+        }
+
+        const targetThread = getStoredChatThread(toId);
+        chatThreadsBySource[toId] = normalizeStoredChatThread([...targetThread, ...sourceThread]);
+        delete chatThreadsBySource[fromId];
+        saveChatThreadsBySource();
+
+        if (chatDocumentSourceId === fromId) {
+            chatDocumentSourceId = toId;
+            chatThread = getStoredChatThread(toId);
         }
     }
 
@@ -1779,6 +1886,10 @@ export function createStudyAidCore() {
         }
     }
 
+    function isBlobBackedDocumentUrl(url) {
+        return /^(blob:|data:)/i.test(cleanMetadataValue(url));
+    }
+
     function buildDocumentLoadSource(source, signature) {
         if (!source) {
             return null;
@@ -1796,7 +1907,25 @@ export function createStudyAidCore() {
         }
 
         const localOverrideUrl = cleanMetadataValue(source.localOverrideUrl);
-        if (localOverrideUrl && !localOverrideUrl.startsWith("blob:")) {
+        if (localOverrideUrl) {
+            if (isBlobBackedDocumentUrl(localOverrideUrl)) {
+                return {
+                    type: "url",
+                    url: localOverrideUrl,
+                    label: "attached local copy",
+                    shouldPersistLocalCopy: false,
+                    warningPrefix: "The attached document could not be read automatically.",
+                };
+            }
+
+            if (/^file:/i.test(localOverrideUrl)) {
+                return {
+                    type: "file-url",
+                    url: localOverrideUrl,
+                    label: "attached local file",
+                };
+            }
+
             const isRemoteHttpOverride = /^https?:\/\//i.test(localOverrideUrl);
             return {
                 type: "url",
@@ -1815,6 +1944,17 @@ export function createStudyAidCore() {
                     source.fileName || inferDownloadFileNameFromUrl(source.url || source.objectUrl || "", source)
                 ),
                 label: source.isImported ? "imported document" : "cached local copy",
+            };
+        }
+
+        const objectUrl = cleanMetadataValue(source.objectUrl);
+        if (isBlobBackedDocumentUrl(objectUrl)) {
+            return {
+                type: "url",
+                url: objectUrl,
+                label: source.isImported ? "imported document" : "cached local copy",
+                shouldPersistLocalCopy: false,
+                warningPrefix: "The cached document could not be read automatically.",
             };
         }
 
@@ -1849,6 +1989,12 @@ export function createStudyAidCore() {
         if (documentSource.type === "local") {
             clearAutomaticDownloadWarning(source);
             return parseDocument(documentSource.file, source, signature);
+        }
+
+        if (documentSource.type === "file-url") {
+            throw new Error(
+                "Browser file paths cannot be read directly for chat context. Reattach the document with the file picker or import it so the file contents can be parsed."
+            );
         }
 
         if (documentSource.type === "url") {
@@ -4032,6 +4178,7 @@ export function createStudyAidCore() {
                 sourceKind: isExplicitDocumentKind(customSource.sourceKind) ? customSource.sourceKind : (staticSource.sourceKind || ""),
             };
 
+            migrateStoredChatThread(customSource.id, staticSource.id);
             delete localOverrides[customSource.id];
             removeMetadataOverride(customSource.id, { persist: false });
             removeReferenceOverride(customSource.id, { persist: false });
@@ -4209,6 +4356,11 @@ export function createStudyAidCore() {
         }
 
         if (source.localOverrideUrl) {
+            if (/^file:/i.test(source.localOverrideUrl) && !(source.localOverrideBlob instanceof Blob)) {
+                viewerHelp.innerHTML = "A local file path is attached, but the browser cannot read a filesystem path directly for chat parsing. Reattach the file with <strong>Attach Local Document To Source</strong> or use <strong>Import Document</strong> so chat can use the full document text.";
+                return;
+            }
+
             viewerHelp.innerHTML = `This source is using an attached local copy${source.localOverrideLabel ? ` from <strong>${escapeHtml(source.localOverrideLabel)}</strong>` : ""}. The viewer uses that local file or local URL instead of the blocked publisher page, and the chat parser extracts plain text from it where supported.`;
             return;
         }
@@ -4427,6 +4579,12 @@ export function createStudyAidCore() {
             return;
         }
 
+        if (/^file:/i.test(localUrl)) {
+            openPdfPicker("link");
+            metaStatus.textContent = "Choose the local file so chat can parse its full text. Typed filesystem paths cannot be read directly by the browser.";
+            return;
+        }
+
         await removePersistedPdfAttachment(activeSource.id, "local");
         const detectedKind = detectDocumentKind(
             {
@@ -4638,6 +4796,7 @@ export function createStudyAidCore() {
 
         const matchingArticle = findMatchingArticle(source, { excludeId: source.id });
         if (matchingArticle) {
+            migrateStoredChatThread(source.id, matchingArticle.id);
             revealArticleInList(matchingArticle);
             return matchingArticle;
         }
@@ -4647,6 +4806,7 @@ export function createStudyAidCore() {
         });
         customSources.unshift(savedSource);
         saveCustomSources();
+        migrateStoredChatThread(source.id, savedSource.id);
         revealArticleInList(savedSource);
         return savedSource;
     }
@@ -6288,6 +6448,32 @@ export function createStudyAidCore() {
 
     function saveSectionDrafts() {
         localStorage.setItem(sectionDraftStorageKey, JSON.stringify(sectionDrafts));
+    }
+
+    function loadChatThreadsBySource() {
+        try {
+            const raw = localStorage.getItem(chatThreadsStorageKey);
+            if (!raw) {
+                return {};
+            }
+
+            const parsed = JSON.parse(raw);
+            if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+                return {};
+            }
+
+            return Object.fromEntries(
+                Object.entries(parsed)
+                    .map(([sourceId, thread]) => [cleanMetadataValue(sourceId), normalizeStoredChatThread(thread)])
+                    .filter(([sourceId, thread]) => Boolean(sourceId) && thread.length)
+            );
+        } catch (error) {
+            return {};
+        }
+    }
+
+    function saveChatThreadsBySource() {
+        localStorage.setItem(chatThreadsStorageKey, JSON.stringify(chatThreadsBySource));
     }
 
     function loadPaperNotesBySource() {

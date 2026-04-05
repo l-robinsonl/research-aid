@@ -44,7 +44,9 @@ export function RightSidebar() {
                     <div className="status-text">
                         Blocked source? Paste a local document path or URL here, then attach it to
                         the active source. Raw `\\wsl.localhost\...`, `C:\...`, and `/home/...`
-                        paths are converted automatically.
+                        paths are converted automatically. If you want chat to read the full
+                        document text, choose or import the file so the browser gets the actual
+                        file contents.
                     </div>
                     <label className="full">
                         Full reference

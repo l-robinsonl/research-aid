@@ -1379,6 +1379,16 @@
             border: 1px solid var(--border);
         }
 
+        .chat-markdown .katex-display {
+            margin: 1em 0;
+            overflow-x: auto;
+            overflow-y: hidden;
+        }
+
+        .chat-markdown .katex {
+            max-width: 100%;
+        }
+
         .chat-markdown th,
         .chat-markdown td {
             padding: 10px 12px;
