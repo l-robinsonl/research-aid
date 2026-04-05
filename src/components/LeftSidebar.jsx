@@ -4,7 +4,12 @@ export function LeftSidebar() {
     return (
         <aside className="refs">
             <div className="section-header">
-                <div className="section-header-title">Module Sections &amp; Sources</div>
+                <div className="section-header-eyebrow">Collections</div>
+                <div className="section-header-title">Module Library</div>
+                <div className="section-header-copy">
+                    Organise sources by section, keep module-specific reading stacks, and jump back
+                    into any paper with its notes and chat intact.
+                </div>
                 <div className="section-header-tools">
                     <label>
                         Sources
@@ -25,7 +30,9 @@ export function LeftSidebar() {
                     </button>
                 </div>
             </div>
-            <div className="scroll-area" id="list"></div>
+            <div className="scroll-area">
+                <div className="library-list" id="list"></div>
+            </div>
         </aside>
     );
 }
