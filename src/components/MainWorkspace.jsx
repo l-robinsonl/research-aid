@@ -36,11 +36,12 @@ export function MainWorkspace() {
                     </div>
                 </div>
                 <div className="viewer-help-card">
-                    <div className="viewer-help-label">Context status</div>
+                    <div className="viewer-help-label">Viewer status</div>
                     <div className="viewer-help" id="viewer-help">
-                        Use the source list, paste a URL in the header, choose documents, or drop
-                        files anywhere in this window. Some library and publisher sites refuse
-                        iframe embedding, so download the file in your browser and import it here.
+                        No source selected. Choose a source from the left, paste a URL in the
+                        header, choose documents, or drop files anywhere in this window. Some
+                        library and publisher sites refuse iframe embedding, so download the file
+                        in your browser and import it here.
                     </div>
                 </div>
                 <div className="viewer-shell">

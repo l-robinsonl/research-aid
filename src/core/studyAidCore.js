@@ -18,11 +18,13 @@ export function createStudyAidCore() {
     const toggleRightBtn = document.getElementById("toggle-right-btn");
     const curName = document.getElementById("cur-name");
     const articleFilterSelect = document.getElementById("article-filter-select");
+    const articleTagFilterInput = document.getElementById("article-tag-filter-input");
     const undoDeleteBtn = document.getElementById("undo-delete-btn");
     const metaTitle = document.getElementById("meta-title");
     const metaAuthor = document.getElementById("meta-author");
     const metaYear = document.getElementById("meta-year");
     const metaPublisher = document.getElementById("meta-publisher");
+    const metaTags = document.getElementById("meta-tags");
     const metaUrl = document.getElementById("meta-url");
     const metaLocalUrl = document.getElementById("meta-local-url");
     const saveArticleBtn = document.getElementById("save-article-btn");
@@ -205,6 +207,7 @@ export function createStudyAidCore() {
     let dragDepth = 0;
     let pdfPickerMode = "import";
     let articleFilter = articleFilterSelect ? articleFilterSelect.value : "all";
+    let articleTagFilter = articleTagFilterInput ? articleTagFilterInput.value : "";
     let pdfAttachmentDbPromise = null;
     const deletedArticleHistory = [];
     let chatWidgetOpen = false;
@@ -927,7 +930,7 @@ export function createStudyAidCore() {
             event.target.value = "";
         });
 
-        [metaTitle, metaAuthor, metaYear, metaPublisher, metaUrl, metaLocalUrl].forEach((input) => {
+        [metaTitle, metaAuthor, metaYear, metaPublisher, metaTags, metaUrl, metaLocalUrl].forEach((input) => {
             input.addEventListener("input", markMetadataDirty);
         });
 
@@ -941,6 +944,11 @@ export function createStudyAidCore() {
 
         articleFilterSelect.addEventListener("change", (event) => {
             articleFilter = event.target.value;
+            renderList();
+        });
+
+        articleTagFilterInput?.addEventListener("input", (event) => {
+            articleTagFilter = event.target.value || "";
             renderList();
         });
 
@@ -4480,19 +4488,35 @@ export function createStudyAidCore() {
         ];
     }
 
+    function filterArticlesByTags(papers) {
+        const requestedTerms = buildTagFilterTerms();
+        if (!requestedTerms.length) {
+            return papers;
+        }
+
+        return papers.filter((paper) => matchesSourceTagFilter(paper, requestedTerms));
+    }
+
     function filterArticles(papers) {
+        let filtered = papers;
+
         if (articleFilter === "linked") {
-            return papers.filter((paper) => isArticleLinked(paper));
+            filtered = filtered.filter((paper) => isArticleLinked(paper));
         }
 
         if (articleFilter === "unlinked") {
-            return papers.filter((paper) => !isArticleLinked(paper));
+            filtered = filtered.filter((paper) => !isArticleLinked(paper));
         }
 
-        return papers;
+        return filterArticlesByTags(filtered);
     }
 
     function getArticlesEmptyMessage() {
+        const requestedTags = buildTagFilterTerms();
+        if (requestedTags.length) {
+            return `No sources match the current tag filter: ${requestedTags.join(", ")}.`;
+        }
+
         if (articleFilter === "linked") {
             return "No linked sources yet. Use Link To Section to add sources to one or more sections.";
         }
@@ -4515,7 +4539,9 @@ export function createStudyAidCore() {
         );
 
         getContentSections().forEach((section) => {
-            const linkedArticles = getAllArticles().filter((paper) => getLinkedSectionKeys(paper).includes(section.key));
+            const linkedArticles = filterArticlesByTags(
+                getAllArticles().filter((paper) => getLinkedSectionKeys(paper).includes(section.key))
+            );
             const emptyMessage = !linkedArticles.length && section.isCustom
                 ? "No sources linked to this custom section yet."
                 : "";
@@ -4562,6 +4588,7 @@ export function createStudyAidCore() {
                     <div class="ref-item-main">
                         <strong>${escapeHtml(paper.author || "Unknown author")} (${escapeHtml(year)})</strong><br>
                         ${escapeHtml(paper.title || "Untitled source")}
+                        ${buildSourceTagMarkup(paper)}
                         ${getListItemStatus(paper, draftSectionKey)}
                     </div>
                     ${actionMarkup}
@@ -4618,12 +4645,71 @@ export function createStudyAidCore() {
         return `<small>${escapeHtml(parts.join(" · "))}</small><small>${escapeHtml(sectionsLabel)}</small>`;
     }
 
+    function normalizeSourceTags(tags) {
+        const values = Array.isArray(tags)
+            ? tags
+            : String(tags || "").split(",");
+        const seen = new Set();
+
+        return values
+            .map((value) => cleanMetadataValue(value))
+            .filter(Boolean)
+            .filter((value) => {
+                const normalizedKey = value.toLowerCase();
+                if (seen.has(normalizedKey)) {
+                    return false;
+                }
+                seen.add(normalizedKey);
+                return true;
+            });
+    }
+
+    function formatSourceTagsInput(tags) {
+        return normalizeSourceTags(tags).join(", ");
+    }
+
+    function buildTagFilterTerms(value = articleTagFilter) {
+        return String(value || "")
+            .split(",")
+            .map((term) => cleanMetadataValue(term).toLowerCase())
+            .filter(Boolean);
+    }
+
+    function getSourceTags(source) {
+        return Array.isArray(source?.tags) ? source.tags : [];
+    }
+
+    function matchesSourceTagFilter(source, requestedTerms = buildTagFilterTerms()) {
+        if (!requestedTerms.length) {
+            return true;
+        }
+
+        const sourceTags = getSourceTags(source).map((tag) => tag.toLowerCase());
+        if (!sourceTags.length) {
+            return false;
+        }
+
+        return requestedTerms.every((term) => sourceTags.some((tag) => tag.includes(term)));
+    }
+
+    function buildSourceTagMarkup(source) {
+        const tags = getSourceTags(source);
+        if (!tags.length) {
+            return "";
+        }
+
+        return `<div class="ref-item-tags">${tags
+            .map((tag) => `<span class="ref-item-tag">${escapeHtml(tag)}</span>`)
+            .join("")}</div>`;
+    }
+
     function normalizePaper(paper) {
         const metadataOverride = metadataOverrides[paper.id] || {};
         const title = cleanMetadataValue(metadataOverride.title || paper.t || paper.title || "");
         const author = cleanMetadataValue(metadataOverride.author || paper.a || paper.author || "");
         const year = cleanMetadataValue(metadataOverride.year || paper.y || paper.year || "");
         const url = cleanMetadataValue(metadataOverride.url || paper.u || paper.url || "");
+        const tags = normalizeSourceTags(metadataOverride.tags || paper.tags || paper.tagList || "");
         const override = localOverrides[paper.id] || {};
         const referenceOverride = referenceOverrides[paper.id] || {};
         const isCustomSource = Boolean(paper.isCustom);
@@ -4654,6 +4740,7 @@ export function createStudyAidCore() {
             year: year || extractYear(url) || "",
             url,
             publisher: cleanMetadataValue(metadataOverride.publisher || paper.publisher || inferPublisherFromUrl(url)),
+            tags,
             baseFullRef: cleanMetadataValue(paper.r || paper.baseFullRef || paper.fullRef || ""),
             baseNarrativeRef: cleanMetadataValue(paper.n || paper.baseNarrativeRef || paper.narrativeRef || ""),
             baseParentheticalRef,
@@ -4805,6 +4892,7 @@ export function createStudyAidCore() {
         metaAuthor.value = source.author || "";
         metaYear.value = source.year || "";
         metaPublisher.value = source.publisher || "";
+        metaTags.value = formatSourceTagsInput(source.tags);
         metaUrl.value = source.url || "";
         metaLocalUrl.value = source.localOverrideUrl || "";
     }
@@ -4887,6 +4975,20 @@ export function createStudyAidCore() {
         return `${author} (${year}) ${title}`;
     }
 
+    function formatViewerSourceTitle(source) {
+        if (!source) {
+            return "";
+        }
+
+        return cleanMetadataValue(
+            source.title
+            || source.fileName
+            || source.localOverrideLabel
+            || source.url
+            || source.localOverrideUrl,
+        );
+    }
+
     function formatArticleLocation(source) {
         if (!source) {
             return "It appears in Sources.";
@@ -4917,6 +5019,13 @@ export function createStudyAidCore() {
             articleFilter = "all";
             if (articleFilterSelect) {
                 articleFilterSelect.value = "all";
+            }
+        }
+
+        if (cleanMetadataValue(articleTagFilter)) {
+            articleTagFilter = "";
+            if (articleTagFilterInput) {
+                articleTagFilterInput.value = "";
             }
         }
 
@@ -4991,6 +5100,10 @@ export function createStudyAidCore() {
                 author: cleanMetadataValue(customSource.author || staticSource.author),
                 year: cleanMetadataValue(customSource.year || staticSource.year),
                 publisher: cleanMetadataValue(customSource.publisher || staticSource.publisher),
+                tags: normalizeSourceTags([
+                    ...getSourceTags(staticSource),
+                    ...getSourceTags(customSource),
+                ]),
                 url: cleanMetadataValue(customSource.url || staticSource.url),
                 sourceKind: isExplicitDocumentKind(customSource.sourceKind) ? customSource.sourceKind : (staticSource.sourceKind || ""),
             };
@@ -5068,6 +5181,7 @@ export function createStudyAidCore() {
         metaAuthor.value = "";
         metaYear.value = "";
         metaPublisher.value = "";
+        metaTags.value = "";
         metaUrl.value = "";
         metaLocalUrl.value = "";
         refFullInput.value = "";
@@ -5128,6 +5242,7 @@ export function createStudyAidCore() {
         activeSource.author = cleanMetadataValue(metaAuthor.value) || inferPublisherFromUrl(metaUrl.value) || "Unknown author";
         activeSource.year = cleanMetadataValue(metaYear.value) || extractYear(metaUrl.value) || "";
         activeSource.publisher = cleanMetadataValue(metaPublisher.value) || inferPublisherFromUrl(metaUrl.value);
+        activeSource.tags = normalizeSourceTags(metaTags.value);
         activeSource.url = normaliseUrl(metaUrl.value);
         if (!isExplicitDocumentKind(activeSource.sourceKind)) {
             activeSource.sourceKind = activeSource.url ? "url" : "manual";
@@ -5158,46 +5273,51 @@ export function createStudyAidCore() {
 
     function updateViewerHelp(source) {
         if (!source) {
-            viewerHelp.innerHTML = "Use the source list, paste a URL, or drop documents anywhere in this window. Some library and publisher sites refuse iframe embedding, so download the file in your browser and import it here.";
+            viewerHelp.innerHTML = "No source selected. Choose a source from the left, paste a URL in the header, or drop documents anywhere in this window. Some library and publisher sites refuse iframe embedding, so download the file in your browser and import it here.";
             return;
         }
 
+        const sourceTitle = formatViewerSourceTitle(source);
+        const sourceLead = sourceTitle
+            ? `Selected source: <strong>${escapeHtml(sourceTitle)}</strong>. `
+            : "Selected source. ";
+
         if (source.autoDownloadWarning) {
-            viewerHelp.innerHTML = escapeHtml(source.autoDownloadWarning);
+            viewerHelp.innerHTML = `${sourceLead}${escapeHtml(source.autoDownloadWarning)}`;
             return;
         }
 
         if (source.isImported) {
-            viewerHelp.innerHTML = `Local ${escapeHtml(getDocumentKindLabel(source.sourceKind))} loaded${source.fileName ? ` from <strong>${escapeHtml(source.fileName)}</strong>` : ""}. The chat parser extracts plain text from the file for AI context where supported.`;
+            viewerHelp.innerHTML = `${sourceLead}Local ${escapeHtml(getDocumentKindLabel(source.sourceKind))} loaded${source.fileName ? ` from <strong>${escapeHtml(source.fileName)}</strong>` : ""}. The chat parser extracts plain text from the file for AI context where supported.`;
             return;
         }
 
         if (source.localOverrideUrl) {
             if (/^file:/i.test(source.localOverrideUrl) && !(source.localOverrideBlob instanceof Blob)) {
-                viewerHelp.innerHTML = "A local file path is attached, but the browser cannot read a filesystem path directly for chat parsing. Reattach the file with <strong>Attach Local Document To Source</strong> or use <strong>Import Document</strong> so chat can use the full document text.";
+                viewerHelp.innerHTML = `${sourceLead}A local file path is attached, but the browser cannot read a filesystem path directly for chat parsing. Reattach the file with <strong>Attach Local Document To Source</strong> or use <strong>Import Document</strong> so chat can use the full document text.`;
                 return;
             }
 
-            viewerHelp.innerHTML = `This source is using an attached local copy${source.localOverrideLabel ? ` from <strong>${escapeHtml(source.localOverrideLabel)}</strong>` : ""}. The viewer uses that local file or local URL instead of the blocked publisher page, and the chat parser extracts plain text from it where supported.`;
+            viewerHelp.innerHTML = `${sourceLead}This source is using an attached local copy${source.localOverrideLabel ? ` from <strong>${escapeHtml(source.localOverrideLabel)}</strong>` : ""}. The viewer uses that local file or local URL instead of the blocked publisher page, and the chat parser extracts plain text from it where supported.`;
             return;
         }
 
         if (source.url && source.fileBlob instanceof Blob) {
-            viewerHelp.innerHTML = `A local cached copy was downloaded automatically from this URL for clean text extraction. The viewer still shows the live page, but chat uses the downloaded copy when possible.`;
+            viewerHelp.innerHTML = `${sourceLead}A local cached copy was downloaded automatically from this URL for clean text extraction. The viewer still shows the live page, but chat uses the downloaded copy when possible.`;
             return;
         }
 
         if (source.url && isLikelyFrameBlocked(source.url)) {
-            viewerHelp.innerHTML = `This host usually blocks iframe viewing. Download the source through your library or publisher portal, then use <strong>Import Document</strong> to work from a local copy here.`;
+            viewerHelp.innerHTML = `${sourceLead}This host usually blocks iframe viewing. Download the source through your library or publisher portal, then use <strong>Import Document</strong> to work from a local copy here.`;
             return;
         }
 
         if (source.url) {
-            viewerHelp.innerHTML = `If the source looks blank or shows "refused to connect", it is being blocked by the site rather than this page. Download the file in your browser, then bring it in with <strong>Import Document</strong>.`;
+            viewerHelp.innerHTML = `${sourceLead}If the source looks blank or shows "refused to connect", it is being blocked by the site rather than this page. Download the file in your browser, then bring it in with <strong>Import Document</strong>.`;
             return;
         }
 
-        viewerHelp.innerHTML = "Add or select a source to start reading and generating citations.";
+        viewerHelp.innerHTML = `${sourceLead}This item is loaded in the workspace, but it does not have a viewer URL yet. You can still edit metadata, attach a local document, or save it into Sources.`;
     }
 
     function generateReference() {
@@ -6555,6 +6675,7 @@ export function createStudyAidCore() {
                 year: source.year || "",
                 url: source.url || "",
                 publisher: source.publisher || "",
+                tags: getSourceTags(source),
                 fullRef: source.fullRef || "",
                 narrativeRef: source.narrativeRef || "",
                 parentheticalRef: getParentheticalReferenceValue(source) || "",
@@ -6631,6 +6752,7 @@ export function createStudyAidCore() {
                 author: cleanMetadataValue(source.author),
                 year: cleanMetadataValue(source.year),
                 publisher: cleanMetadataValue(source.publisher),
+                tags: getSourceTags(source),
                 url: cleanMetadataValue(source.url),
                 sourceKind: isExplicitDocumentKind(source.sourceKind) ? source.sourceKind : "",
             };
@@ -7073,6 +7195,7 @@ export function createStudyAidCore() {
                 year: paper.year,
                 url: paper.url,
                 publisher: paper.publisher,
+                tags: getSourceTags(paper),
                 baseFullRef: paper.baseFullRef,
                 baseNarrativeRef: paper.baseNarrativeRef,
                 baseParentheticalRef: paper.baseParentheticalRef,

@@ -40,6 +40,14 @@ export function RightSidebar() {
                                 <input id="meta-publisher" type="text" placeholder="Publisher or journal" />
                             </label>
                             <label className="full">
+                                Tags
+                                <input
+                                    id="meta-tags"
+                                    type="text"
+                                    placeholder="Comma-separated tags, e.g. class imbalance, ensemble methods"
+                                />
+                            </label>
+                            <label className="full">
                                 URL
                                 <input id="meta-url" type="text" placeholder="Optional URL for the source" />
                             </label>

@@ -19,6 +19,14 @@ export function LeftSidebar() {
                             <option value="unlinked">Unlinked</option>
                         </select>
                     </label>
+                    <label>
+                        Tags
+                        <input
+                            id="article-tag-filter-input"
+                            type="text"
+                            placeholder="e.g. class imbalance"
+                        />
+                    </label>
                     <button
                         className="section-header-btn"
                         id="undo-delete-btn"
