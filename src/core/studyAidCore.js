@@ -13,6 +13,7 @@ export function createStudyAidCore() {
     const urlInput = document.getElementById("url-input");
     const moduleSelect = document.getElementById("module-select");
     const pdfInput = document.getElementById("pdf-input");
+    const workspaceImportInput = document.getElementById("workspace-import-input");
     const toggleLeftBtn = document.getElementById("toggle-left-btn");
     const toggleRightBtn = document.getElementById("toggle-right-btn");
     const curName = document.getElementById("cur-name");
@@ -94,6 +95,26 @@ export function createStudyAidCore() {
     const collapsibleCardToggles = Array.from(document.querySelectorAll("[data-collapse-target]"));
 
     const moduleRegistryStorageKey = "study_aid_module_registry_v1";
+    const moduleScopedWorkspaceStorageBaseKeys = [
+        "study_aid_section_drafts_v1",
+        "study_aid_local_overrides_v1",
+        "study_aid_custom_sources_v1",
+        "study_aid_custom_sections_v1",
+        "study_aid_source_link_overrides_v1",
+        "study_aid_draft_panel_detached_v1",
+        "study_aid_draft_panel_frame_v1",
+        "study_aid_paper_notes_frame_v1",
+        "study_aid_paper_notes_expanded_v1",
+        "study_aid_active_source_v1",
+        "study_aid_reference_overrides_v1",
+        "study_aid_metadata_overrides_v1",
+        "study_aid_attachment_meta_v1",
+        "study_aid_ai_chat_config_v1",
+        "study_aid_chat_threads_v1",
+        "study_aid_right_panel_collapsed_v1",
+        "study_aid_source_notes_v1",
+    ];
+    const workspaceSnapshotVersion = 1;
     const defaultModuleKey = "default";
     const moduleQueryParam = "module";
     const moduleRegistry = loadModuleRegistry();
@@ -246,6 +267,10 @@ export function createStudyAidCore() {
 
     function buildScopedStorageKey(baseKey) {
         return `${baseKey}__${activeModuleKey}`;
+    }
+
+    function buildScopedStorageKeyForModule(baseKey, moduleKey) {
+        return `${baseKey}__${normalizeModuleKey(moduleKey) || defaultModuleKey}`;
     }
 
     function loadModuleRegistry() {
@@ -508,6 +533,369 @@ export function createStudyAidCore() {
         return true;
     }
 
+    function getWorkspaceExportFilename() {
+        const dateStamp = new Date().toISOString().slice(0, 10);
+        return `study-aid-workspace-${dateStamp}.saw`;
+    }
+
+    function downloadBlobFile(blob, filename) {
+        const objectUrl = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = objectUrl;
+        link.download = filename;
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    }
+
+    function readFileAsText(file) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result || ""));
+            reader.onerror = () => reject(reader.error || new Error("The selected file could not be read."));
+            reader.readAsText(file);
+        });
+    }
+
+    function blobToDataUrl(blob) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result || ""));
+            reader.onerror = () => reject(reader.error || new Error("The attachment could not be encoded."));
+            reader.readAsDataURL(blob);
+        });
+    }
+
+    function dataUrlToBlob(dataUrl) {
+        const match = String(dataUrl || "").match(/^data:([^;,]*)(;base64)?,([\s\S]+)$/i);
+        if (!match) {
+            throw new Error("The attachment payload is not a valid data URL.");
+        }
+
+        const mimeType = match[1] || "application/octet-stream";
+        const isBase64 = Boolean(match[2]);
+        const body = match[3] || "";
+        const decoded = isBase64 ? atob(body) : decodeURIComponent(body);
+        const bytes = new Uint8Array(decoded.length);
+        for (let index = 0; index < decoded.length; index += 1) {
+            bytes[index] = decoded.charCodeAt(index);
+        }
+        return new Blob([bytes], { type: mimeType });
+    }
+
+    function parseModuleScopedWorkspaceValue(raw) {
+        if (raw === null || raw === undefined) {
+            return null;
+        }
+
+        try {
+            return JSON.parse(raw);
+        } catch (error) {
+            return null;
+        }
+    }
+
+    function buildWorkspaceGlobalSnapshot() {
+        return {
+            [themeStorageKey]: localStorage.getItem(themeStorageKey) || "light",
+            [chatWidgetExpandedStorageKey]: localStorage.getItem(chatWidgetExpandedStorageKey) || "false",
+        };
+    }
+
+    function buildWorkspaceModuleStorageSnapshot(moduleKey) {
+        return Object.fromEntries(
+            moduleScopedWorkspaceStorageBaseKeys
+                .map((baseKey) => {
+                    const value = parseModuleScopedWorkspaceValue(
+                        localStorage.getItem(buildScopedStorageKeyForModule(baseKey, moduleKey))
+                    );
+                    return value === null ? null : [baseKey, value];
+                })
+                .filter(Boolean)
+        );
+    }
+
+    async function buildWorkspaceAttachmentSnapshot(attachmentMeta) {
+        const attachments = {};
+        const entries = attachmentMeta && typeof attachmentMeta === "object" && !Array.isArray(attachmentMeta)
+            ? Object.entries(attachmentMeta)
+            : [];
+
+        for (const [sourceId, kinds] of entries) {
+            for (const kind of ["object", "local"]) {
+                if (!kinds?.[kind]) {
+                    continue;
+                }
+
+                const blob = await getPdfAttachmentBlob(sourceId, kind);
+                if (!(blob instanceof Blob)) {
+                    continue;
+                }
+
+                attachments[sourceId] = attachments[sourceId] || {};
+                attachments[sourceId][kind] = {
+                    label: cleanMetadataValue(kinds[kind].label),
+                    type: blob.type || "application/octet-stream",
+                    dataUrl: await blobToDataUrl(blob),
+                };
+            }
+        }
+
+        return attachments;
+    }
+
+    async function buildWorkspaceSnapshot() {
+        const modules = [];
+
+        for (const moduleEntry of moduleRegistry) {
+            const storage = buildWorkspaceModuleStorageSnapshot(moduleEntry.key);
+            const attachments = await buildWorkspaceAttachmentSnapshot(storage["study_aid_attachment_meta_v1"]);
+            modules.push({
+                key: moduleEntry.key,
+                label: moduleEntry.label,
+                storage,
+                attachments,
+            });
+        }
+
+        return {
+            snapshotType: "study-aid-workspace",
+            format: "saw",
+            version: workspaceSnapshotVersion,
+            exportedAt: new Date().toISOString(),
+            modules,
+            globals: buildWorkspaceGlobalSnapshot(),
+        };
+    }
+
+    function openWorkspaceImportPicker() {
+        workspaceImportInput?.click();
+    }
+
+    function normalizeImportedWorkspaceGlobals(globals) {
+        const raw = globals && typeof globals === "object" && !Array.isArray(globals) ? globals : {};
+        return {
+            [themeStorageKey]: raw[themeStorageKey] === "dark" ? "dark" : "light",
+            [chatWidgetExpandedStorageKey]: raw[chatWidgetExpandedStorageKey] === "true" ? "true" : "false",
+        };
+    }
+
+    function normalizeImportedWorkspaceStorage(storage) {
+        const normalized = {};
+        const raw = storage && typeof storage === "object" && !Array.isArray(storage) ? storage : {};
+
+        moduleScopedWorkspaceStorageBaseKeys.forEach((baseKey) => {
+            if (Object.prototype.hasOwnProperty.call(raw, baseKey)) {
+                normalized[baseKey] = raw[baseKey];
+            }
+        });
+
+        return normalized;
+    }
+
+    function normalizeImportedWorkspaceAttachments(attachments) {
+        const raw = attachments && typeof attachments === "object" && !Array.isArray(attachments) ? attachments : {};
+        const normalized = {};
+
+        Object.entries(raw).forEach(([sourceId, kinds]) => {
+            const cleanSourceId = cleanMetadataValue(sourceId);
+            if (!cleanSourceId || !kinds || typeof kinds !== "object" || Array.isArray(kinds)) {
+                return;
+            }
+
+            const nextKinds = {};
+            ["object", "local"].forEach((kind) => {
+                const entry = kinds[kind];
+                if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+                    return;
+                }
+
+                const dataUrl = typeof entry.dataUrl === "string" ? entry.dataUrl : "";
+                if (!/^data:/i.test(dataUrl)) {
+                    return;
+                }
+
+                nextKinds[kind] = {
+                    label: cleanMetadataValue(entry.label),
+                    type: cleanMetadataValue(entry.type),
+                    dataUrl,
+                };
+            });
+
+            if (Object.keys(nextKinds).length) {
+                normalized[cleanSourceId] = nextKinds;
+            }
+        });
+
+        return normalized;
+    }
+
+    function normalizeImportedWorkspaceSnapshot(payload) {
+        if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+            throw new Error("The selected file is not a valid workspace snapshot.");
+        }
+
+        const rawModules = Array.isArray(payload.modules) ? payload.modules : [];
+        if (!rawModules.length) {
+            throw new Error("No modules were found in this workspace file.");
+        }
+
+        const usedKeys = new Set();
+        const modules = rawModules.map((entry, index) => {
+            const requestedKey = normalizeModuleKey(entry?.key || entry?.moduleKey || entry?.slug)
+                || (index === 0 ? defaultModuleKey : `imported-module-${index + 1}`);
+            let key = requestedKey;
+            let suffix = 2;
+            while (usedKeys.has(key)) {
+                key = `${requestedKey}-${suffix}`;
+                suffix += 1;
+            }
+            usedKeys.add(key);
+
+            return {
+                key,
+                label: cleanMetadataValue(entry?.label || entry?.name || (key === defaultModuleKey ? "Default Module" : `Imported Module ${index + 1}`)),
+                storage: normalizeImportedWorkspaceStorage(entry?.storage),
+                attachments: normalizeImportedWorkspaceAttachments(entry?.attachments),
+            };
+        });
+
+        return {
+            snapshotType: "study-aid-workspace",
+            version: Number.parseInt(payload.version, 10) || workspaceSnapshotVersion,
+            modules,
+            globals: normalizeImportedWorkspaceGlobals(payload.globals),
+        };
+    }
+
+    async function clearWorkspaceModuleAttachmentBlobs(moduleKey) {
+        const attachmentMeta = parseModuleScopedWorkspaceValue(
+            localStorage.getItem(buildScopedStorageKeyForModule("study_aid_attachment_meta_v1", moduleKey))
+        );
+
+        if (!attachmentMeta || typeof attachmentMeta !== "object" || Array.isArray(attachmentMeta)) {
+            return;
+        }
+
+        for (const [sourceId, kinds] of Object.entries(attachmentMeta)) {
+            for (const kind of ["object", "local"]) {
+                if (kinds?.[kind]) {
+                    await deletePdfAttachmentBlob(sourceId, kind);
+                }
+            }
+        }
+    }
+
+    function clearWorkspaceModuleStorage(moduleKey) {
+        moduleScopedWorkspaceStorageBaseKeys.forEach((baseKey) => {
+            localStorage.removeItem(buildScopedStorageKeyForModule(baseKey, moduleKey));
+        });
+    }
+
+    function mergeImportedModulesIntoRegistry(importedModules) {
+        const mergedByKey = new Map(moduleRegistry.map((entry) => [entry.key, { ...entry }]));
+        importedModules.forEach((entry) => {
+            mergedByKey.set(entry.key, { key: entry.key, label: entry.label });
+        });
+
+        if (!mergedByKey.has(defaultModuleKey)) {
+            mergedByKey.set(defaultModuleKey, { key: defaultModuleKey, label: "Default Module" });
+        }
+
+        const existingOrder = moduleRegistry.map((entry) => entry.key);
+        const merged = [];
+        existingOrder.forEach((key) => {
+            if (mergedByKey.has(key)) {
+                merged.push(mergedByKey.get(key));
+                mergedByKey.delete(key);
+            }
+        });
+
+        if (mergedByKey.has(defaultModuleKey) && !merged.some((entry) => entry.key === defaultModuleKey)) {
+            merged.unshift(mergedByKey.get(defaultModuleKey));
+            mergedByKey.delete(defaultModuleKey);
+        }
+
+        merged.push(...Array.from(mergedByKey.values()));
+
+        moduleRegistry.splice(0, moduleRegistry.length, ...merged);
+        saveModuleRegistry();
+    }
+
+    async function applyWorkspaceSnapshot(snapshot) {
+        for (const moduleEntry of snapshot.modules) {
+            await clearWorkspaceModuleAttachmentBlobs(moduleEntry.key);
+            clearWorkspaceModuleStorage(moduleEntry.key);
+
+            Object.entries(moduleEntry.storage).forEach(([baseKey, value]) => {
+                localStorage.setItem(
+                    buildScopedStorageKeyForModule(baseKey, moduleEntry.key),
+                    JSON.stringify(value)
+                );
+            });
+
+            for (const [sourceId, kinds] of Object.entries(moduleEntry.attachments)) {
+                for (const kind of ["object", "local"]) {
+                    if (!kinds[kind]?.dataUrl) {
+                        continue;
+                    }
+
+                    const blob = dataUrlToBlob(kinds[kind].dataUrl);
+                    await putPdfAttachmentBlob(sourceId, kind, blob);
+                }
+            }
+        }
+
+        mergeImportedModulesIntoRegistry(snapshot.modules);
+
+        Object.entries(snapshot.globals).forEach(([key, value]) => {
+            localStorage.setItem(key, String(value));
+        });
+    }
+
+    async function exportWorkspace() {
+        try {
+            const snapshot = await buildWorkspaceSnapshot();
+            const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: "application/json" });
+            downloadBlobFile(blob, getWorkspaceExportFilename());
+        } catch (error) {
+            window.alert(`Workspace export failed: ${error.message || "Unknown error"}`);
+        }
+    }
+
+    async function importWorkspaceFromFileList(fileList) {
+        const file = fileList?.[0];
+        if (!file) {
+            return;
+        }
+
+        try {
+            const contents = await readFileAsText(file);
+            const parsed = JSON.parse(contents);
+            const snapshot = normalizeImportedWorkspaceSnapshot(parsed);
+            const overwrittenModuleCount = snapshot.modules.filter((moduleEntry) => moduleRegistry.some((entry) => entry.key === moduleEntry.key)).length;
+            const confirmed = window.confirm(
+                `Import workspace from "${file.name}"?\n\n`
+                + `${snapshot.modules.length} module${snapshot.modules.length === 1 ? "" : "s"} will be imported. `
+                + (overwrittenModuleCount
+                    ? `${overwrittenModuleCount} matching module${overwrittenModuleCount === 1 ? "" : "s"} will be overwritten. `
+                    : "New modules will be added alongside the current workspace. ")
+                + "The page will reload afterwards."
+            );
+
+            if (!confirmed) {
+                return;
+            }
+
+            await applyWorkspaceSnapshot(snapshot);
+            window.alert(
+                `Imported ${snapshot.modules.length} module${snapshot.modules.length === 1 ? "" : "s"} from "${file.name}". The app will reload now.`
+            );
+            window.location.reload();
+        } catch (error) {
+            window.alert(`Workspace import failed: ${error.message || "Unknown error"}`);
+        }
+    }
+
     function loadChatWidgetExpanded() {
         try {
             return localStorage.getItem(chatWidgetExpandedStorageKey) === "true";
@@ -532,6 +920,11 @@ export function createStudyAidCore() {
             }
             event.target.value = "";
             pdfPickerMode = "import";
+        });
+
+        workspaceImportInput?.addEventListener("change", async (event) => {
+            await importWorkspaceFromFileList(event.target.files);
+            event.target.value = "";
         });
 
         [metaTitle, metaAuthor, metaYear, metaPublisher, metaUrl, metaLocalUrl].forEach((input) => {
@@ -7071,6 +7464,8 @@ export function createStudyAidCore() {
     const actions = {
         undoDeleteArticle,
         openCreateModuleModal,
+        exportWorkspace,
+        openWorkspaceImportPicker,
         openTypedUrl,
         openPdfPicker,
         toggleTheme,

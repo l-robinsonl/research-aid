@@ -53,6 +53,20 @@ export default function App() {
                         >
                             New Module
                         </button>
+                        <button
+                            className="btn secondary compact"
+                            type="button"
+                            onClick={createStudyAidHandler("exportWorkspace")}
+                        >
+                            Export Workspace
+                        </button>
+                        <button
+                            className="btn secondary compact"
+                            type="button"
+                            onClick={createStudyAidHandler("openWorkspaceImportPicker")}
+                        >
+                            Import .saw
+                        </button>
                         <div className="app-active-source">
                             <span className="app-active-source-label">Active source</span>
                             <strong id="cur-name">None</strong>
@@ -73,6 +87,12 @@ export default function App() {
             </div>
             <ChatWidget />
             <CreateModuleModal />
+            <input
+                className="hidden-input"
+                id="workspace-import-input"
+                type="file"
+                accept=".saw,.json,application/json"
+            />
         </>
     );
 }
