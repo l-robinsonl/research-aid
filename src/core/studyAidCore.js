@@ -37,14 +37,17 @@ export function createStudyAidCore() {
     const draftSectionSelect = document.getElementById("draft-section-select");
     const draftStatus = document.getElementById("draft-status");
     const draftPanel = document.getElementById("draft-panel");
+    const draftPanelHeader = draftPanel?.querySelector(".draft-panel-header");
     const draftPanelSection = document.getElementById("draft-panel-section");
     const draftDetachBtn = document.getElementById("draft-detach-btn");
-    const draftMaximizeBtn = document.getElementById("draft-maximize-btn");
     const draftEditorModeToggle = document.getElementById("draft-editor-mode-toggle");
     const draftEditorBody = document.getElementById("draft-editor-body");
     const draftPreview = document.getElementById("draft-preview");
     const draftMarkdownStatus = document.getElementById("draft-markdown-status");
+    const paperNotesCard = document.querySelector(".paper-notes-card");
+    const paperNotesHeader = paperNotesCard?.querySelector(".editor-widget-header");
     const paperNotesModeToggle = document.getElementById("paper-notes-mode-toggle");
+    const paperNotesSizeBtn = document.getElementById("paper-notes-size-btn");
     const paperNotesBody = document.getElementById("paper-notes-body");
     const paperNotesInput = document.getElementById("paper-notes-input");
     const paperNotesPreview = document.getElementById("paper-notes-preview");
@@ -67,6 +70,8 @@ export function createStudyAidCore() {
     const aiInstructionNewBtn = document.getElementById("ai-instruction-new-btn");
     const aiInstructionDeleteBtn = document.getElementById("ai-instruction-delete-btn");
     const aiInstructionStatus = document.getElementById("ai-instruction-status");
+    const paperNotesLauncher = document.getElementById("paper-notes-launcher");
+    const draftLauncher = document.getElementById("draft-launcher");
     const chatLauncher = document.getElementById("chat-launcher");
     const chatWidget = document.getElementById("chat-widget");
     const chatMinimizeBtn = document.getElementById("chat-minimize-btn");
@@ -100,6 +105,9 @@ export function createStudyAidCore() {
     const customSectionsStorageKey = buildScopedStorageKey("study_aid_custom_sections_v1");
     const articleLinkOverrideStorageKey = buildScopedStorageKey("study_aid_source_link_overrides_v1");
     const draftPanelDetachedStorageKey = buildScopedStorageKey("study_aid_draft_panel_detached_v1");
+    const draftPanelFrameStorageKey = buildScopedStorageKey("study_aid_draft_panel_frame_v1");
+    const paperNotesFrameStorageKey = buildScopedStorageKey("study_aid_paper_notes_frame_v1");
+    const paperNotesExpandedStorageKey = buildScopedStorageKey("study_aid_paper_notes_expanded_v1");
     const activeSourceStorageKey = buildScopedStorageKey("study_aid_active_source_v1");
     const referenceOverrideStorageKey = buildScopedStorageKey("study_aid_reference_overrides_v1");
     const metadataOverrideStorageKey = buildScopedStorageKey("study_aid_metadata_overrides_v1");
@@ -166,9 +174,13 @@ export function createStudyAidCore() {
     let sectionDrafts = loadSectionDrafts();
     let activeDraftSectionKey = generalDraftSectionKey;
     let draftPanelDetached = loadDraftPanelDetached();
-    let draftPanelMaximized = false;
+    let draftPanelFrame = loadDraftPanelFrame();
+    let paperNotesFrame = loadPaperNotesFrame();
     let draftEditorMode = "edit";
     let paperNotesEditorMode = "edit";
+    let paperNotesExpanded = loadPaperNotesExpanded();
+    let draftPanelDragState = null;
+    let paperNotesDragState = null;
     let dragDepth = 0;
     let pdfPickerMode = "import";
     let articleFilter = articleFilterSelect ? articleFilterSelect.value : "all";
@@ -216,6 +228,7 @@ export function createStudyAidCore() {
         updateDeleteArticleButtonState(null);
         updateColumnToggleButtons();
         setDraftPanelDetached(draftPanelDetached, { persist: false });
+        setPaperNotesExpanded(paperNotesExpanded, { persist: false });
         setDraftEditorMode(draftEditorMode);
         setPaperNotesEditorMode(paperNotesEditorMode);
         renderPaperNotesEditor();
@@ -711,7 +724,16 @@ export function createStudyAidCore() {
         window.addEventListener("dragover", handleDragOver);
         window.addEventListener("dragleave", handleDragLeave);
         window.addEventListener("drop", handleDrop);
+        window.addEventListener("resize", handleWindowResize);
         window.addEventListener("beforeunload", cleanupObjectUrls);
+
+        if (draftPanelHeader) {
+            draftPanelHeader.addEventListener("mousedown", startDraftPanelDrag);
+        }
+
+        if (paperNotesHeader) {
+            paperNotesHeader.addEventListener("mousedown", startPaperNotesDrag);
+        }
     }
 
     function configureExternalDocumentLibraries() {
@@ -1579,6 +1601,408 @@ export function createStudyAidCore() {
         return String(value || "")
             .replace(/\u0000/g, " ")
             .replace(/\r\n?/g, "\n");
+    }
+
+    function loadPanelFrame(storageKey) {
+        try {
+            const raw = localStorage.getItem(storageKey);
+            if (!raw) {
+                return null;
+            }
+
+            const parsed = JSON.parse(raw);
+            if (!parsed || typeof parsed !== "object") {
+                return null;
+            }
+
+            const frame = {
+                left: Number(parsed.left),
+                top: Number(parsed.top),
+            };
+
+            return Number.isFinite(frame.left) && Number.isFinite(frame.top) ? frame : null;
+        } catch (error) {
+            return null;
+        }
+    }
+
+    function loadDraftPanelFrame() {
+        return loadPanelFrame(draftPanelFrameStorageKey);
+    }
+
+    function loadPaperNotesFrame() {
+        return loadPanelFrame(paperNotesFrameStorageKey);
+    }
+
+    function getPanelDimensions(panel, fallbackWidth, fallbackHeight) {
+        const rect = panel?.getBoundingClientRect?.();
+        return {
+            width: Math.max(Math.round(rect?.width || 0), fallbackWidth),
+            height: Math.max(Math.round(rect?.height || 0), fallbackHeight),
+        };
+    }
+
+    function clampPanelPosition(panel, frame, fallbackWidth, fallbackHeight) {
+        const viewportWidth = Math.max(window.innerWidth || 0, 720);
+        const viewportHeight = Math.max(window.innerHeight || 0, 560);
+        const safeMargin = 12;
+        const { width, height } = getPanelDimensions(panel, fallbackWidth, fallbackHeight);
+        const left = Math.min(
+            Math.max(Math.round(Number(frame?.left) || safeMargin), safeMargin),
+            Math.max(safeMargin, viewportWidth - width - safeMargin)
+        );
+        const top = Math.min(
+            Math.max(Math.round(Number(frame?.top) || safeMargin), safeMargin),
+            Math.max(safeMargin, viewportHeight - height - safeMargin)
+        );
+        return { left, top };
+    }
+
+    function savePanelFrame(storageKey, frame) {
+        if (!frame) {
+            localStorage.removeItem(storageKey);
+            return;
+        }
+
+        localStorage.setItem(storageKey, JSON.stringify(frame));
+    }
+
+    function getDefaultDraftPanelFrame() {
+        const viewportWidth = window.innerWidth || 1280;
+        const viewportHeight = window.innerHeight || 900;
+        const { width, height } = getPanelDimensions(draftPanel, 900, 660);
+        return clampPanelPosition(
+            draftPanel,
+            {
+                left: viewportWidth - width - 28,
+                top: Math.max(82, viewportHeight - height - 108),
+            },
+            900,
+            660
+        );
+    }
+
+    function getDefaultPaperNotesFrame() {
+        const viewportWidth = window.innerWidth || 1280;
+        const viewportHeight = window.innerHeight || 900;
+        const { width, height } = getPanelDimensions(paperNotesCard, 560, 420);
+        return clampPanelPosition(
+            paperNotesCard,
+            {
+                left: viewportWidth - width - 28,
+                top: Math.max(104, viewportHeight - height - 108),
+            },
+            560,
+            420
+        );
+    }
+
+    function applyDraftPanelFrame(frame, options = {}) {
+        if (!draftPanel) {
+            return;
+        }
+
+        const resolvedFrame = clampPanelPosition(draftPanel, frame || draftPanelFrame || getDefaultDraftPanelFrame(), 900, 660);
+        draftPanelFrame = resolvedFrame;
+        draftPanel.style.left = `${resolvedFrame.left}px`;
+        draftPanel.style.top = `${resolvedFrame.top}px`;
+
+        if (options.persist === false) {
+            return;
+        }
+
+        savePanelFrame(draftPanelFrameStorageKey, draftPanelFrame);
+    }
+
+    function applyPaperNotesFrame(frame, options = {}) {
+        if (!paperNotesCard) {
+            return;
+        }
+
+        const resolvedFrame = clampPanelPosition(
+            paperNotesCard,
+            frame || paperNotesFrame || getDefaultPaperNotesFrame(),
+            560,
+            420
+        );
+        paperNotesFrame = resolvedFrame;
+        paperNotesCard.style.left = `${resolvedFrame.left}px`;
+        paperNotesCard.style.top = `${resolvedFrame.top}px`;
+
+        if (options.persist === false) {
+            return;
+        }
+
+        savePanelFrame(paperNotesFrameStorageKey, paperNotesFrame);
+    }
+
+    function clearDraftPanelFrameStyles() {
+        if (!draftPanel) {
+            return;
+        }
+
+        draftPanel.style.removeProperty("left");
+        draftPanel.style.removeProperty("top");
+    }
+
+    function clearPaperNotesFrameStyles() {
+        if (!paperNotesCard) {
+            return;
+        }
+
+        paperNotesCard.style.removeProperty("left");
+        paperNotesCard.style.removeProperty("top");
+    }
+
+    function isFloatingPanelDragTargetInteractive(target) {
+        return Boolean(target?.closest("button, input, textarea, select, a, label"));
+    }
+
+    function startDraftPanelDrag(event) {
+        if (!draftPanelDetached || !draftPanelHeader || event.button !== 0) {
+            return;
+        }
+
+        if (isFloatingPanelDragTargetInteractive(event.target)) {
+            return;
+        }
+
+        event.preventDefault();
+        const rect = draftPanel.getBoundingClientRect();
+        draftPanelDragState = {
+            offsetX: event.clientX - rect.left,
+            offsetY: event.clientY - rect.top,
+        };
+        document.body.classList.add("is-dragging-floating-panel");
+        window.addEventListener("mousemove", handleDraftPanelDrag);
+        window.addEventListener("mouseup", stopDraftPanelDrag);
+    }
+
+    function handleDraftPanelDrag(event) {
+        if (!draftPanelDragState || !draftPanelDetached) {
+            return;
+        }
+
+        applyDraftPanelFrame(
+            {
+                left: event.clientX - draftPanelDragState.offsetX,
+                top: event.clientY - draftPanelDragState.offsetY,
+            },
+            { persist: false }
+        );
+    }
+
+    function stopDraftPanelDrag() {
+        if (!draftPanelDragState) {
+            return;
+        }
+
+        const rect = draftPanel?.getBoundingClientRect?.();
+        draftPanelDragState = null;
+        document.body.classList.remove("is-dragging-floating-panel");
+        window.removeEventListener("mousemove", handleDraftPanelDrag);
+        window.removeEventListener("mouseup", stopDraftPanelDrag);
+        if (rect) {
+            applyDraftPanelFrame({ left: rect.left, top: rect.top });
+        }
+    }
+
+    function startPaperNotesDrag(event) {
+        if (!paperNotesExpanded || !paperNotesHeader || event.button !== 0) {
+            return;
+        }
+
+        if (isFloatingPanelDragTargetInteractive(event.target)) {
+            return;
+        }
+
+        event.preventDefault();
+        const rect = paperNotesCard.getBoundingClientRect();
+        paperNotesDragState = {
+            offsetX: event.clientX - rect.left,
+            offsetY: event.clientY - rect.top,
+        };
+        document.body.classList.add("is-dragging-floating-panel");
+        window.addEventListener("mousemove", handlePaperNotesDrag);
+        window.addEventListener("mouseup", stopPaperNotesDrag);
+    }
+
+    function handlePaperNotesDrag(event) {
+        if (!paperNotesDragState || !paperNotesExpanded) {
+            return;
+        }
+
+        applyPaperNotesFrame(
+            {
+                left: event.clientX - paperNotesDragState.offsetX,
+                top: event.clientY - paperNotesDragState.offsetY,
+            },
+            { persist: false }
+        );
+    }
+
+    function stopPaperNotesDrag() {
+        if (!paperNotesDragState) {
+            return;
+        }
+
+        const rect = paperNotesCard?.getBoundingClientRect?.();
+        paperNotesDragState = null;
+        document.body.classList.remove("is-dragging-floating-panel");
+        window.removeEventListener("mousemove", handlePaperNotesDrag);
+        window.removeEventListener("mouseup", stopPaperNotesDrag);
+        if (rect) {
+            applyPaperNotesFrame({ left: rect.left, top: rect.top });
+        }
+    }
+
+    function handleWindowResize() {
+        if (draftPanelDetached) {
+            applyDraftPanelFrame(draftPanelFrame || getDefaultDraftPanelFrame());
+        }
+
+        if (paperNotesExpanded) {
+            applyPaperNotesFrame(paperNotesFrame || getDefaultPaperNotesFrame());
+        }
+    }
+
+    function getMarkdownEditorInput(editorKey) {
+        if (editorKey === "draft") {
+            return notepad;
+        }
+
+        if (editorKey === "paper-notes") {
+            return paperNotesInput;
+        }
+
+        return null;
+    }
+
+    function setMarkdownToolbarDisabled(editorKey, disabled) {
+        document
+            .querySelectorAll(`[data-markdown-toolbar="${editorKey}"] .markdown-toolbar-btn`)
+            .forEach((button) => {
+                button.disabled = Boolean(disabled);
+            });
+    }
+
+    function replaceMarkdownSelection(textarea, nextState) {
+        if (!textarea || !nextState) {
+            return;
+        }
+
+        textarea.value = nextState.value;
+        textarea.dispatchEvent(new Event("input", { bubbles: true }));
+        textarea.focus();
+        textarea.setSelectionRange(nextState.selectionStart, nextState.selectionEnd);
+    }
+
+    function wrapMarkdownSelection(value, start, end, prefix, suffix, placeholder) {
+        const selected = value.slice(start, end);
+        const content = selected || placeholder;
+        const replacement = `${prefix}${content}${suffix}`;
+        return {
+            value: `${value.slice(0, start)}${replacement}${value.slice(end)}`,
+            selectionStart: start + prefix.length,
+            selectionEnd: start + prefix.length + content.length,
+        };
+    }
+
+    function prefixMarkdownLines(value, start, end, buildPrefix) {
+        const blockStart = value.lastIndexOf("\n", Math.max(0, start - 1)) + 1;
+        const nextLineBreak = value.indexOf("\n", end);
+        const blockEnd = nextLineBreak === -1 ? value.length : nextLineBreak;
+        const block = value.slice(blockStart, blockEnd);
+        const lines = block.split("\n");
+        const hasContent = lines.some((line) => line.trim());
+        let itemIndex = 1;
+
+        const formatted = lines
+            .map((line, index) => {
+                if (!line.trim()) {
+                    return !hasContent && index === 0 ? buildPrefix(itemIndex, line) : line;
+                }
+
+                const prefix = buildPrefix(itemIndex, line);
+                itemIndex += 1;
+                return `${prefix}${line}`;
+            })
+            .join("\n");
+
+        return {
+            value: `${value.slice(0, blockStart)}${formatted}${value.slice(blockEnd)}`,
+            selectionStart: blockStart,
+            selectionEnd: blockStart + formatted.length,
+        };
+    }
+
+    function insertMarkdownLink(value, start, end) {
+        const selected = value.slice(start, end);
+        const label = selected || "link text";
+        const url = "https://example.com";
+        const replacement = `[${label}](${url})`;
+        const labelStart = start + 1;
+        const urlStart = start + label.length + 3;
+
+        return {
+            value: `${value.slice(0, start)}${replacement}${value.slice(end)}`,
+            selectionStart: selected ? urlStart : labelStart,
+            selectionEnd: selected ? urlStart + url.length : labelStart + label.length,
+        };
+    }
+
+    function insertMarkdownDivider(value, start, end) {
+        const divider = "\n\n---\n\n";
+        const nextValue = `${value.slice(0, start)}${divider}${value.slice(end)}`;
+        const caretPosition = start + divider.length;
+        return {
+            value: nextValue,
+            selectionStart: caretPosition,
+            selectionEnd: caretPosition,
+        };
+    }
+
+    function buildMarkdownFormatResult(value, start, end, action) {
+        switch (action) {
+            case "heading":
+                return prefixMarkdownLines(value, start, end, () => "## ");
+            case "bold":
+                return wrapMarkdownSelection(value, start, end, "**", "**", "Bold text");
+            case "italic":
+                return wrapMarkdownSelection(value, start, end, "*", "*", "Italic text");
+            case "link":
+                return insertMarkdownLink(value, start, end);
+            case "quote":
+                return prefixMarkdownLines(value, start, end, () => "> ");
+            case "bullet-list":
+                return prefixMarkdownLines(value, start, end, () => "- ");
+            case "number-list":
+                return prefixMarkdownLines(value, start, end, (index) => `${index}. `);
+            case "code": {
+                const selected = value.slice(start, end);
+                if (selected.includes("\n")) {
+                    return wrapMarkdownSelection(value, start, end, "```\n", "\n```", "code");
+                }
+                return wrapMarkdownSelection(value, start, end, "`", "`", "code");
+            }
+            case "divider":
+                return insertMarkdownDivider(value, start, end);
+            default:
+                return null;
+        }
+    }
+
+    function applyMarkdownFormat(editorKey, action) {
+        const textarea = getMarkdownEditorInput(editorKey);
+        if (!textarea || textarea.disabled) {
+            return;
+        }
+
+        const value = normalizeMarkdownEditorText(textarea.value);
+        const start = Number.isInteger(textarea.selectionStart) ? textarea.selectionStart : value.length;
+        const end = Number.isInteger(textarea.selectionEnd) ? textarea.selectionEnd : value.length;
+        const nextState = buildMarkdownFormatResult(value, start, end, action);
+        replaceMarkdownSelection(textarea, nextState);
     }
 
     function updateEditorModeToggle(toggleElement, mode) {
@@ -5436,36 +5860,28 @@ export function createStudyAidCore() {
         setDraftPanelDetached(!draftPanelDetached);
     }
 
-    function toggleDraftPanelMaximized() {
-        if (collapsedRightPanels["draft-editor"]) {
-            setCollapsibleSectionState("draft-editor", false);
-        }
-
-        if (!draftPanelDetached) {
-            setDraftPanelDetached(true, { persist: true });
-        }
-
-        draftPanelMaximized = !draftPanelMaximized;
-        renderDraftPanelState();
-    }
-
     function renderDraftPanelState() {
-        draftPanel.classList.toggle("is-maximized", draftPanelDetached && draftPanelMaximized);
-        draftDetachBtn.textContent = draftPanelDetached ? "Return To Column" : "Expand Editor";
-
-        if (draftMaximizeBtn) {
-            draftMaximizeBtn.textContent = draftPanelDetached && draftPanelMaximized ? "Windowed" : "Maximise";
-            draftMaximizeBtn.disabled = !draftPanelDetached;
+        draftPanel.classList.toggle("is-detached", draftPanelDetached);
+        draftPanel.classList.toggle("is-open", draftPanelDetached);
+        draftPanel.setAttribute("aria-hidden", draftPanelDetached ? "false" : "true");
+        if (draftDetachBtn) {
+            draftDetachBtn.textContent = "Close";
+        }
+        if (draftLauncher) {
+            draftLauncher.classList.toggle("is-active", draftPanelDetached);
         }
     }
 
     function setDraftPanelDetached(detached, options = {}) {
         draftPanelDetached = Boolean(detached);
-        if (!draftPanelDetached) {
-            draftPanelMaximized = false;
-        }
-        draftPanel.classList.toggle("is-detached", draftPanelDetached);
         renderDraftPanelState();
+        if (draftPanelDetached) {
+            applyDraftPanelFrame(draftPanelFrame || getDefaultDraftPanelFrame(), { persist: false });
+            requestAnimationFrame(() => notepad?.focus());
+        } else {
+            stopDraftPanelDrag();
+            clearDraftPanelFrameStyles();
+        }
         updateDraftStatus();
 
         if (options.persist === false) {
@@ -6395,10 +6811,7 @@ export function createStudyAidCore() {
     function updateDraftStatus() {
         const sectionText = sectionDrafts[activeDraftSectionKey] || "";
         const wordCount = countWords(sectionText);
-        const mode = draftPanelDetached
-            ? (draftPanelMaximized ? "Maximised editor" : "Floating editor")
-            : "Sidebar editor";
-        draftStatus.textContent = `Editing ${getDraftSectionLabel(activeDraftSectionKey)} · ${wordCount} words · ${mode}`;
+        draftStatus.textContent = `Editing ${getDraftSectionLabel(activeDraftSectionKey)} · ${wordCount} words · floating draft panel`;
     }
 
     function buildCompiledDraft() {
@@ -6502,6 +6915,51 @@ export function createStudyAidCore() {
         localStorage.setItem(paperNotesStorageKey, JSON.stringify(paperNotesBySource));
     }
 
+    function loadPaperNotesExpanded() {
+        try {
+            return JSON.parse(localStorage.getItem(paperNotesExpandedStorageKey) || "false") === true;
+        } catch (error) {
+            return false;
+        }
+    }
+
+    function renderPaperNotesPanelState() {
+        if (!paperNotesCard) {
+            return;
+        }
+
+        paperNotesCard.classList.toggle("is-open", paperNotesExpanded);
+        paperNotesCard.setAttribute("aria-hidden", paperNotesExpanded ? "false" : "true");
+        if (paperNotesSizeBtn) {
+            paperNotesSizeBtn.textContent = "Close";
+        }
+        if (paperNotesLauncher) {
+            paperNotesLauncher.classList.toggle("is-active", paperNotesExpanded);
+        }
+    }
+
+    function setPaperNotesExpanded(expanded, options = {}) {
+        paperNotesExpanded = Boolean(expanded);
+        renderPaperNotesPanelState();
+        if (paperNotesExpanded) {
+            applyPaperNotesFrame(paperNotesFrame || getDefaultPaperNotesFrame(), { persist: false });
+            requestAnimationFrame(() => paperNotesInput?.focus());
+        } else {
+            stopPaperNotesDrag();
+            clearPaperNotesFrameStyles();
+        }
+
+        if (options.persist === false) {
+            return;
+        }
+
+        localStorage.setItem(paperNotesExpandedStorageKey, JSON.stringify(paperNotesExpanded));
+    }
+
+    function togglePaperNotesExpanded() {
+        setPaperNotesExpanded(!paperNotesExpanded);
+    }
+
     function setPaperNotesEditorMode(mode) {
         paperNotesEditorMode = normalizeEditorMode(mode);
         updateEditorModeToggle(paperNotesModeToggle, paperNotesEditorMode);
@@ -6518,6 +6976,7 @@ export function createStudyAidCore() {
             paperNotesInput.value = "";
             paperNotesInput.disabled = true;
             paperNotesInput.placeholder = "Select a source to keep notes for that paper...";
+            setMarkdownToolbarDisabled("paper-notes", true);
             renderMarkdownPreview(paperNotesPreview, "", "Select a source to preview paper notes.");
             paperNotesStatus.textContent = "Select a source to keep notes for that paper.";
             return;
@@ -6529,6 +6988,7 @@ export function createStudyAidCore() {
         }
 
         paperNotesInput.disabled = false;
+        setMarkdownToolbarDisabled("paper-notes", false);
         paperNotesInput.placeholder = `Keep paper-specific notes for ${activeSource.title || "this source"}...`;
         renderMarkdownPreview(
             paperNotesPreview,
@@ -6629,7 +7089,8 @@ export function createStudyAidCore() {
         createCustomSection,
         deleteSelectedSection,
         toggleDraftPanelDetached,
-        toggleDraftPanelMaximized,
+        togglePaperNotesExpanded,
+        applyMarkdownFormat,
         downloadTxt,
         toggleChatWidget,
         toggleChatWidgetExpanded,
