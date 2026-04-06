@@ -1,14 +1,28 @@
 {
-  "private": true,
+  "name": "study-aid-workbench",
+  "version": "0.1.0",
+  "description": "Local-first reading, note-taking, drafting, and AI chat workbench for papers and course documents.",
+  "private": false,
+  "keywords": [
+    "study",
+    "research",
+    "notes",
+    "papers",
+    "pdf",
+    "ai",
+    "local-first"
+  ],
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview"
   },
   "dependencies": {
-    "@vitejs/plugin-react": "^6.0.1",
     "react": "^19.2.4",
-    "react-dom": "^19.2.4",
+    "react-dom": "^19.2.4"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.0.1",
     "vite": "^8.0.3"
   }
 }
