@@ -96,6 +96,16 @@ export function RightSidebar() {
                         </div>
                         <div className="button-stack">
                             <button
+                                className="btn secondary"
+                                id="meta-ai-populate-btn"
+                                type="button"
+                                onClick={createStudyAidHandler("populateMetadataWithAi")}
+                            >
+                                Fill Metadata With AI
+                            </button>
+                        </div>
+                        <div className="button-stack">
+                            <button
                                 className="btn"
                                 type="button"
                                 onClick={createStudyAidHandler("generateReference")}

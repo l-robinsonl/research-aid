@@ -27,6 +27,7 @@ export function createStudyAidCore() {
     const metaTags = document.getElementById("meta-tags");
     const metaUrl = document.getElementById("meta-url");
     const metaLocalUrl = document.getElementById("meta-local-url");
+    const metaAiPopulateBtn = document.getElementById("meta-ai-populate-btn");
     const saveArticleBtn = document.getElementById("save-article-btn");
     const deleteArticleBtn = document.getElementById("delete-article-btn");
     const refFullInput = document.getElementById("ref-full-input");
@@ -228,6 +229,8 @@ export function createStudyAidCore() {
     let aiConfigStatusMessage = "";
     let aiInstructionStatusMessage = "";
     let aiInstructionEditorPresetId = "";
+    let metadataAiRequestInFlight = false;
+    let metadataAiRequestToken = 0;
     let activeTheme = loadThemePreference();
     let createModuleModalReturnFocus = null;
 
@@ -1415,6 +1418,19 @@ export function createStudyAidCore() {
         return baseUrl ? `${mode}:${baseUrl}` : "";
     }
 
+    function getAiRequestConfigError(mode = aiChatConfig.mode) {
+        const modeConfig = getAiModeConfig(mode);
+        if (!cleanMetadataValue(modeConfig.baseUrl) || !cleanMetadataValue(modeConfig.model)) {
+            return "Complete AI Chat Config first: mode, base URL, and model are required.";
+        }
+
+        if (mode === "remote" && !aiChatConfig.remote.apiKey) {
+            return "Remote mode also needs an API key.";
+        }
+
+        return "";
+    }
+
     function saveAiChatConfig() {
         localStorage.setItem(aiChatConfigStorageKey, JSON.stringify(aiChatConfig));
     }
@@ -1433,6 +1449,7 @@ export function createStudyAidCore() {
 
         renderAiModelList();
         renderAiConfigStatus();
+        renderMetadataAiAction();
     }
 
     function initializeAiInstructionEditor() {
@@ -1661,6 +1678,29 @@ export function createStudyAidCore() {
         aiConfigStatus.textContent = hasBaseUrl && hasModel
             ? `Local mode is configured. Root LM Studio URLs are resolved automatically to /api/v1 or /v1. ${contextLimitStatus}`
             : `Local mode needs an LM Studio URL and model. Root URLs are resolved automatically. No API key is required. ${contextLimitStatus}`;
+    }
+
+    function renderMetadataAiAction() {
+        if (!metaAiPopulateBtn) {
+            return;
+        }
+
+        const configError = getAiRequestConfigError();
+        const hasSource = Boolean(activeSource);
+        metaAiPopulateBtn.disabled = metadataAiRequestInFlight || !hasSource || Boolean(configError);
+        metaAiPopulateBtn.textContent = metadataAiRequestInFlight ? "Reading Metadata..." : "Fill Metadata With AI";
+
+        if (metadataAiRequestInFlight) {
+            metaAiPopulateBtn.title = "The model is extracting metadata from the current document.";
+            return;
+        }
+
+        if (!hasSource) {
+            metaAiPopulateBtn.title = "Select or import a source first.";
+            return;
+        }
+
+        metaAiPopulateBtn.title = configError || "Ask the configured model to inspect the current document text and fill these fields.";
     }
 
     function renderCollapsibleSections() {
@@ -3967,7 +4007,15 @@ export function createStudyAidCore() {
         return prioritizeAiEndpointCandidates(candidates, preferredFlavor);
     }
 
-    function buildChatRequestPlans(baseUrl, mode, model, question, context, preferredFlavor = getAiModeConfig(mode).apiFlavor) {
+    function buildSingleTurnAiRequestPlans(
+        baseUrl,
+        mode,
+        model,
+        systemPrompt,
+        userPrompt,
+        options = {},
+        preferredFlavor = getAiModeConfig(mode).apiFlavor,
+    ) {
         const trimmed = cleanMetadataValue(baseUrl).replace(/\/+$/, "");
         if (!trimmed) {
             return [];
@@ -3975,12 +4023,21 @@ export function createStudyAidCore() {
 
         const candidates = [];
         const seen = new Set();
+        const temperature = typeof options.temperature === "number" ? options.temperature : 0.2;
+        const openAiMessages = Array.isArray(options.messages) && options.messages.length
+            ? options.messages
+            : [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: userPrompt },
+            ];
+        const lmStudioInput = cleanMetadataValue(options.lmStudioInput || userPrompt) || userPrompt;
         const addOpenAiCandidate = (url) => {
             addAiEndpointCandidate(candidates, seen, url, "openai-compatible", {
                 body: {
                     model,
-                    temperature: 0.2,
-                    messages: buildChatMessages(question, context),
+                    temperature,
+                    messages: openAiMessages,
+                    ...(options.openAiBody && typeof options.openAiBody === "object" ? options.openAiBody : {}),
                 },
             });
         };
@@ -3988,10 +4045,11 @@ export function createStudyAidCore() {
             addAiEndpointCandidate(candidates, seen, url, "lmstudio-native", {
                 body: {
                     model,
-                    temperature: 0.2,
-                    input: buildLmStudioNativeInput(question),
-                    system_prompt: buildDocumentChatSystemPrompt(context),
+                    temperature,
+                    input: lmStudioInput,
+                    system_prompt: systemPrompt,
                     stream: false,
+                    ...(options.lmStudioBody && typeof options.lmStudioBody === "object" ? options.lmStudioBody : {}),
                 },
             });
         };
@@ -4030,6 +4088,58 @@ export function createStudyAidCore() {
         }
 
         return prioritizeAiEndpointCandidates(candidates, preferredFlavor);
+    }
+
+    function buildChatRequestPlans(baseUrl, mode, model, question, context, preferredFlavor = getAiModeConfig(mode).apiFlavor) {
+        return buildSingleTurnAiRequestPlans(
+            baseUrl,
+            mode,
+            model,
+            buildDocumentChatSystemPrompt(context),
+            question,
+            {
+                temperature: 0.2,
+                messages: buildChatMessages(question, context),
+                lmStudioInput: buildLmStudioNativeInput(question),
+            },
+            preferredFlavor,
+        );
+    }
+
+    async function resolveAiTextFromPlans(plans, requestMode) {
+        let lastError = new Error("No AI endpoint succeeded.");
+
+        for (const plan of plans) {
+            try {
+                const response = await fetch(plan.url, {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        ...(requestMode === "remote" ? { Authorization: `Bearer ${aiChatConfig.remote.apiKey}` } : {}),
+                    },
+                    body: JSON.stringify(plan.body),
+                });
+
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    throw new Error(payload.error?.message || `Request failed with ${response.status}`);
+                }
+
+                const candidateText = extractAssistantMessageText(payload, plan.apiFlavor);
+                if (!candidateText) {
+                    throw new Error("The model returned an empty response.");
+                }
+
+                return {
+                    text: candidateText,
+                    apiFlavor: plan.apiFlavor,
+                };
+            } catch (error) {
+                lastError = error instanceof Error ? error : new Error(String(error));
+            }
+        }
+
+        throw lastError;
     }
 
     function extractModelIds(payload) {
@@ -4174,19 +4284,14 @@ export function createStudyAidCore() {
             return;
         }
 
+        const configError = getAiRequestConfigError();
+        if (configError) {
+            chatStatusMessage = configError;
+            renderChatWidget();
+            return;
+        }
+
         const modeConfig = getAiModeConfig();
-        if (!cleanMetadataValue(modeConfig.baseUrl) || !cleanMetadataValue(modeConfig.model)) {
-            chatStatusMessage = "Complete the AI Chat Config first: mode, base URL, and model are required.";
-            renderChatWidget();
-            return;
-        }
-
-        if (aiChatConfig.mode === "remote" && !aiChatConfig.remote.apiKey) {
-            chatStatusMessage = "Remote mode also needs an API key.";
-            renderChatWidget();
-            return;
-        }
-
         primeChatNotificationAudio();
         toggleChatWidget(true);
         chatInput.value = "";
@@ -4220,53 +4325,18 @@ export function createStudyAidCore() {
         }
 
         try {
-            let assistantText = "";
-            let resolvedApiFlavor = "";
-            let lastError = new Error("No chat endpoint succeeded.");
-
-            for (const plan of chatPlans) {
-                try {
-                    const response = await fetch(plan.url, {
-                        method: "POST",
-                        headers: {
-                            "Content-Type": "application/json",
-                            ...(requestMode === "remote" ? { Authorization: `Bearer ${aiChatConfig.remote.apiKey}` } : {}),
-                        },
-                        body: JSON.stringify(plan.body),
-                    });
-
-                    const payload = await response.json().catch(() => ({}));
-                    if (!response.ok) {
-                        throw new Error(payload.error?.message || `Request failed with ${response.status}`);
-                    }
-
-                    const candidateText = extractAssistantMessageText(payload, plan.apiFlavor);
-                    if (!candidateText) {
-                        throw new Error("The model returned an empty response.");
-                    }
-
-                    assistantText = candidateText;
-                    resolvedApiFlavor = plan.apiFlavor;
-                    break;
-                } catch (error) {
-                    lastError = error instanceof Error ? error : new Error(String(error));
-                }
-            }
-
-            if (!assistantText) {
-                throw lastError;
-            }
+            const result = await resolveAiTextFromPlans(chatPlans, requestMode);
 
             if (requestToken !== chatRequestToken || !activeSource || activeSource.id !== requestSourceId) {
                 return;
             }
 
             if (getAiModelsEndpointKey(requestMode) === requestEndpointKey) {
-                modeConfig.apiFlavor = resolvedApiFlavor;
+                modeConfig.apiFlavor = result.apiFlavor;
                 saveAiChatConfig();
             }
 
-            appendChatMessage("assistant", assistantText);
+            appendChatMessage("assistant", result.text);
             notifyChatResponseReceived();
             chatStatusMessage = `Response received using ${context.kind} document context.`;
         } catch (error) {
@@ -4323,6 +4393,410 @@ export function createStudyAidCore() {
         }
 
         return typeof content === "string" ? content : "";
+    }
+
+    function buildMetadataExtractionPromptContext(context) {
+        const excerptLimit = 18000;
+        const excerpt = truncateDocumentText(context?.text || "", excerptLimit);
+        return excerpt || "";
+    }
+
+    function buildMetadataExtractionSystemPrompt() {
+        return [
+            "You extract bibliographic metadata from a single document.",
+            "Return only a valid JSON object.",
+            "Do not include markdown fences, commentary, or extra text.",
+            "Use only evidence from the supplied document excerpt and current metadata snapshot.",
+            "Prefer the title page, heading block, abstract header, and publication details near the start of the document.",
+            "Do not invent missing facts.",
+            "If a field is unclear, use an empty string. If no good tags are obvious, use an empty array.",
+            "Use this exact JSON shape:",
+            "{\"title\":\"\",\"author\":\"\",\"year\":\"\",\"publisher\":\"\",\"tags\":[]}",
+            "Rules:",
+            "- title: the best full document title, not a running header.",
+            "- author: a single string. For multiple authors, join them with '; '. Use an organisation only if the document presents one instead of named authors.",
+            "- year: four digits only, or an empty string.",
+            "- publisher: journal, conference, publisher, institution, or report body if clearly stated.",
+            "- tags: 3 to 6 short lowercase topical tags when possible.",
+        ].join("\n");
+    }
+
+    function buildMetadataExtractionUserPrompt(source, context) {
+        const currentMetadata = [
+            `Title: ${cleanMetadataValue(source?.title) || ""}`,
+            `Author: ${cleanMetadataValue(source?.author) || ""}`,
+            `Year: ${cleanMetadataValue(source?.year) || ""}`,
+            `Publisher: ${cleanMetadataValue(source?.publisher) || ""}`,
+            `URL: ${cleanMetadataValue(source?.url) || ""}`,
+            `Tags: ${formatSourceTagsInput(getSourceTags(source))}`,
+        ].join("\n");
+        const excerpt = buildMetadataExtractionPromptContext(context);
+
+        return [
+            "Current metadata snapshot (may be wrong):",
+            currentMetadata,
+            "",
+            `Document label: ${context.label}`,
+            `Context type: ${context.kind}`,
+            `Context note: ${context.note}`,
+            "",
+            "Document excerpt to inspect:",
+            excerpt,
+        ].join("\n");
+    }
+
+    function collectLikelyJsonObjectStrings(text) {
+        const cleaned = String(text || "").trim();
+        if (!cleaned) {
+            return [];
+        }
+
+        const candidates = [];
+        const fencedPattern = /```(?:json)?\s*([\s\S]*?)```/gi;
+        let fencedMatch = fencedPattern.exec(cleaned);
+        while (fencedMatch) {
+            if (fencedMatch[1]) {
+                candidates.push(fencedMatch[1].trim());
+            }
+            fencedMatch = fencedPattern.exec(cleaned);
+        }
+
+        for (let start = cleaned.indexOf("{"); start !== -1; start = cleaned.indexOf("{", start + 1)) {
+            let depth = 0;
+            let inString = false;
+            let isEscaped = false;
+
+            for (let index = start; index < cleaned.length; index += 1) {
+                const char = cleaned[index];
+                if (inString) {
+                    if (isEscaped) {
+                        isEscaped = false;
+                    } else if (char === "\\") {
+                        isEscaped = true;
+                    } else if (char === "\"") {
+                        inString = false;
+                    }
+                    continue;
+                }
+
+                if (char === "\"") {
+                    inString = true;
+                    continue;
+                }
+
+                if (char === "{") {
+                    depth += 1;
+                    continue;
+                }
+
+                if (char === "}") {
+                    depth -= 1;
+                    if (depth === 0) {
+                        candidates.push(cleaned.slice(start, index + 1));
+                        break;
+                    }
+                }
+            }
+        }
+
+        candidates.push(cleaned);
+        return [...new Set(candidates.filter(Boolean))];
+    }
+
+    function parseJsonObjectFromText(text) {
+        const candidates = collectLikelyJsonObjectStrings(text);
+
+        for (const candidate of candidates) {
+            const normalizedCandidate = candidate
+                .replace(/^\uFEFF/, "")
+                .replace(/[“”]/g, "\"")
+                .replace(/[‘’]/g, "'")
+                .replace(/,\s*([}\]])/g, "$1")
+                .trim();
+
+            try {
+                const parsed = JSON.parse(normalizedCandidate);
+                if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+                    return parsed;
+                }
+            } catch (error) {
+                // Try the next candidate.
+            }
+        }
+
+        return null;
+    }
+
+    function normalizeAuthorDisplayValue(value) {
+        const cleaned = cleanMetadataValue(value);
+        if (!cleaned || cleaned === "Unknown author") {
+            return cleaned;
+        }
+
+        const hasLetters = /[A-Za-zÀ-ÖØ-öø-ÿ]/.test(cleaned);
+        if (!hasLetters) {
+            return cleaned;
+        }
+
+        const shouldNormalize = cleaned === cleaned.toUpperCase() || cleaned === cleaned.toLowerCase();
+        if (!shouldNormalize) {
+            return cleaned;
+        }
+
+        return cleaned.replace(/[A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ'’.-]*/g, (word) => normalizeAuthorWord(word));
+    }
+
+    function normalizeAuthorWord(word) {
+        if (!word) {
+            return "";
+        }
+
+        if (/^[A-Z]{2,5}$/.test(word)) {
+            return word;
+        }
+
+        if (/^[A-Z](?:\.[A-Z])+\.?$/i.test(word) || /^[A-Z]\.$/i.test(word)) {
+            return word.toUpperCase();
+        }
+
+        return word
+            .split(/([-'’])/)
+            .map((part) => {
+                if (!part || /^[-'’]$/.test(part)) {
+                    return part;
+                }
+
+                if (/^[A-Z]{2,5}$/i.test(part) && word === word.toUpperCase()) {
+                    return part.toUpperCase();
+                }
+
+                return part.charAt(0).toUpperCase() + part.slice(1).toLowerCase();
+            })
+            .join("");
+    }
+
+    function normalizeAiAuthorValue(value) {
+        if (Array.isArray(value)) {
+            return normalizeAuthorDisplayValue(value
+                .map((entry) => {
+                    if (typeof entry === "string") {
+                        return entry;
+                    }
+
+                    return entry?.name || entry?.author || entry?.full_name || entry?.display_name || "";
+                })
+                .filter(Boolean)
+                .join("; "));
+        }
+
+        return normalizeAuthorDisplayValue(value);
+    }
+
+    function normalizeAiYearValue(value) {
+        const cleaned = cleanMetadataValue(value);
+        const match = cleaned.match(/\b(19|20)\d{2}\b/);
+        return match ? match[0] : "";
+    }
+
+    function normalizeAiMetadataUrl(value) {
+        const cleaned = cleanMetadataValue(value);
+        if (!cleaned) {
+            return "";
+        }
+
+        if (/^10\.\d{4,9}\//i.test(cleaned)) {
+            return `https://doi.org/${cleaned}`;
+        }
+
+        return normaliseUrl(cleaned);
+    }
+
+    function normalizeAiMetadataPayload(payload) {
+        const normalized = payload && typeof payload === "object" && !Array.isArray(payload) ? payload : {};
+        return {
+            title: cleanMetadataValue(normalized.title || normalized.document_title || normalized.paper_title || ""),
+            author: normalizeAiAuthorValue(normalized.author || normalized.authors || normalized.author_list || normalized.creators || ""),
+            year: normalizeAiYearValue(normalized.year || normalized.publication_year || normalized.published_year || normalized.date || ""),
+            publisher: cleanMetadataValue(
+                normalized.publisher
+                || normalized.journal
+                || normalized.venue
+                || normalized.source
+                || normalized.booktitle
+                || normalized.institution
+                || "",
+            ),
+            tags: normalizeSourceTags(normalized.tags || normalized.keywords || normalized.topics || normalized.subjects || []),
+            url: normalizeAiMetadataUrl(normalized.url || normalized.doi_url || normalized.doi || normalized.link || ""),
+        };
+    }
+
+    function listAiMetadataUpdates(metadata) {
+        const labels = [];
+        if (metadata.title) {
+            labels.push("title");
+        }
+        if (metadata.author) {
+            labels.push("author");
+        }
+        if (metadata.year) {
+            labels.push("year");
+        }
+        if (metadata.publisher) {
+            labels.push("publisher");
+        }
+        if (metadata.tags.length) {
+            labels.push("tags");
+        }
+        if (metadata.url) {
+            labels.push("URL");
+        }
+        return labels;
+    }
+
+    function applyAiMetadataToSource(source, metadata) {
+        if (!source) {
+            return;
+        }
+
+        source.title = metadata.title;
+        source.author = metadata.author;
+        source.year = metadata.year;
+        source.publisher = metadata.publisher;
+
+        if (metadata.tags.length) {
+            source.tags = metadata.tags;
+        }
+
+        if (metadata.url && !cleanMetadataValue(source.url)) {
+            source.url = metadata.url;
+        }
+    }
+
+    function syncDocumentContextLabel(source) {
+        if (!source?.id) {
+            return;
+        }
+
+        const nextLabel = cleanMetadataValue(source.title) || activeDocumentContext.label || "Untitled source";
+        const cached = documentContextCache.get(source.id);
+        if (cached) {
+            documentContextCache.set(source.id, {
+                ...cached,
+                label: nextLabel,
+            });
+        }
+
+        if (activeDocumentContext.sourceId === source.id) {
+            activeDocumentContext = {
+                ...activeDocumentContext,
+                label: nextLabel,
+            };
+            renderChatWidget();
+        }
+    }
+
+    async function populateMetadataWithAi() {
+        const source = syncActiveSourceFromForm();
+        if (!source) {
+            metaStatus.textContent = "Select or open a source first.";
+            return;
+        }
+
+        const configError = getAiRequestConfigError();
+        if (configError) {
+            metaStatus.textContent = configError;
+            renderMetadataAiAction();
+            return;
+        }
+
+        const requestMode = aiChatConfig.mode;
+        const modeConfig = getAiModeConfig(requestMode);
+        const requestEndpointKey = getAiModelsEndpointKey(requestMode);
+        const requestSourceId = source.id;
+        const requestToken = ++metadataAiRequestToken;
+
+        metadataAiRequestInFlight = true;
+        renderMetadataAiAction();
+        metaStatus.textContent = "Preparing readable document text for AI metadata extraction...";
+
+        try {
+            const context = await refreshActiveDocumentContext(false);
+            if (requestToken !== metadataAiRequestToken || !activeSource || activeSource.id !== requestSourceId) {
+                return;
+            }
+
+            if (!context.available || !cleanMetadataValue(context.text) || context.kind === "metadata") {
+                metaStatus.textContent = "AI metadata fill needs readable document text. Import or attach the document file first so the app can inspect the actual content.";
+                return;
+            }
+
+            const plans = buildSingleTurnAiRequestPlans(
+                modeConfig.baseUrl,
+                requestMode,
+                modeConfig.model,
+                buildMetadataExtractionSystemPrompt(),
+                buildMetadataExtractionUserPrompt(source, context),
+                {
+                    temperature: 0.1,
+                },
+            );
+
+            if (!plans.length) {
+                metaStatus.textContent = "AI metadata fill failed. Check the configured base URL.";
+                return;
+            }
+
+            const result = await resolveAiTextFromPlans(plans, requestMode);
+            if (requestToken !== metadataAiRequestToken || !activeSource || activeSource.id !== requestSourceId) {
+                return;
+            }
+
+            if (getAiModelsEndpointKey(requestMode) === requestEndpointKey) {
+                modeConfig.apiFlavor = result.apiFlavor;
+                saveAiChatConfig();
+            }
+
+            const parsedPayload = parseJsonObjectFromText(result.text);
+            if (!parsedPayload) {
+                throw new Error("The model did not return valid JSON metadata.");
+            }
+
+            const metadata = normalizeAiMetadataPayload(parsedPayload);
+            const updatedFields = listAiMetadataUpdates(metadata);
+            if (!updatedFields.length) {
+                throw new Error("The model returned JSON, but it did not contain usable metadata fields.");
+            }
+
+            applyAiMetadataToSource(source, metadata);
+            fillMetadataForm(source);
+            curName.innerText = source.title || "Untitled source";
+            updateViewerHelp(source);
+            syncDocumentContextLabel(source);
+            saveActiveSourceState(source);
+
+            if (source.isCustom || source.id?.startsWith("static-")) {
+                persistMetadataForSource(source);
+                renderList();
+            } else {
+                updateSaveToArticlesButtonState(source);
+                updateDeleteArticleButtonState(source);
+            }
+
+            renderPaperNotesEditor();
+            metaStatus.textContent = `AI filled ${updatedFields.join(", ")} from the document text. Review the result, then click Generate Citation if you want to refresh the citation.`;
+        } catch (error) {
+            if (requestToken !== metadataAiRequestToken || !activeSource || activeSource.id !== requestSourceId) {
+                return;
+            }
+
+            metaStatus.textContent = `AI metadata fill failed: ${error.message || "Unknown error"}`;
+        } finally {
+            if (requestToken === metadataAiRequestToken) {
+                metadataAiRequestInFlight = false;
+                renderMetadataAiAction();
+            }
+        }
     }
 
     function getKnownSectionKeys() {
@@ -4706,7 +5180,7 @@ export function createStudyAidCore() {
     function normalizePaper(paper) {
         const metadataOverride = metadataOverrides[paper.id] || {};
         const title = cleanMetadataValue(metadataOverride.title || paper.t || paper.title || "");
-        const author = cleanMetadataValue(metadataOverride.author || paper.a || paper.author || "");
+        const author = normalizeAuthorDisplayValue(metadataOverride.author || paper.a || paper.author || "");
         const year = cleanMetadataValue(metadataOverride.year || paper.y || paper.year || "");
         const url = cleanMetadataValue(metadataOverride.url || paper.u || paper.url || "");
         const tags = normalizeSourceTags(metadataOverride.tags || paper.tags || paper.tagList || "");
@@ -4790,6 +5264,7 @@ export function createStudyAidCore() {
         updateActiveListItem(source.id);
         updateSaveToArticlesButtonState(source);
         updateDeleteArticleButtonState(source);
+        renderMetadataAiAction();
 
         if (loadViewer) {
             loadViewerSource(getViewerUrl(source));
@@ -5191,6 +5666,7 @@ export function createStudyAidCore() {
         renderLinkedSectionsSummary(null);
         updateSaveToArticlesButtonState(null);
         updateDeleteArticleButtonState(null);
+        renderMetadataAiAction();
     }
 
     function markMetadataDirty(event) {
@@ -5207,6 +5683,7 @@ export function createStudyAidCore() {
         syncActiveSourceFromForm();
         curName.innerText = activeSource.title || "Untitled source";
         invalidateDocumentContextForSource(activeSource);
+        renderMetadataAiAction();
 
         if (event?.target === metaLocalUrl) {
             metaStatus.textContent = "Local document path edited. Click Attach Local Document To Source to store it against this source.";
@@ -5239,7 +5716,7 @@ export function createStudyAidCore() {
         }
 
         activeSource.title = cleanMetadataValue(metaTitle.value) || inferTitleFromUrl(metaUrl.value) || "Untitled source";
-        activeSource.author = cleanMetadataValue(metaAuthor.value) || inferPublisherFromUrl(metaUrl.value) || "Unknown author";
+        activeSource.author = normalizeAuthorDisplayValue(metaAuthor.value) || inferPublisherFromUrl(metaUrl.value) || "Unknown author";
         activeSource.year = cleanMetadataValue(metaYear.value) || extractYear(metaUrl.value) || "";
         activeSource.publisher = cleanMetadataValue(metaPublisher.value) || inferPublisherFromUrl(metaUrl.value);
         activeSource.tags = normalizeSourceTags(metaTags.value);
@@ -6047,6 +6524,7 @@ export function createStudyAidCore() {
         clearSavedActiveSource();
         updateSaveToArticlesButtonState(null);
         updateDeleteArticleButtonState(null);
+        renderMetadataAiAction();
         metaStatus.textContent = "Select a source or drop a document to auto-fill this panel.";
         renderPaperNotesEditor();
     }
@@ -6128,7 +6606,7 @@ export function createStudyAidCore() {
 
         return {
             title: cleanMetadataValue(xmp.title || info.title),
-            author: cleanMetadataValue(xmp.creator || info.author),
+            author: normalizeAuthorDisplayValue(xmp.creator || info.author),
             publisher: cleanMetadataValue(xmp.publisher || info.creator),
             year: extractYear(xmp.createDate || info.creationDate),
         };
@@ -7596,6 +8074,7 @@ export function createStudyAidCore() {
         toggleToolsColumn,
         toggleNotes,
         generateReference,
+        populateMetadataWithAi,
         saveReferenceToPaper,
         attachLocalPdfToPaper,
         clearLocalOverride,
